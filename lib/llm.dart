@@ -53,6 +53,7 @@ enum LlmProvider {
   nvidia,
   groq,
   gemini,
+  openrouter,
 }
 
 /// Content class to represent input for the model (No changes)
@@ -678,6 +679,210 @@ class GeminiLlmClient extends BaseLlmClient {
 }
 
 
+/// OpenRouter client implementation (OpenAI compatible)
+class OpenRouterLlmClient extends BaseLlmClient {
+  // Optional: Define constants for your site details if you want to use them
+  static const String _siteUrl = '<YOUR_SITE_URL>'; // Replace or make configurable
+  static const String _siteTitle = '<YOUR_SITE_NAME>'; // Replace or make configurable
+
+  OpenRouterLlmClient({
+    required super.apiKey,
+    required super.modelName, // Expects specific model like 'google/gemma-3-27b-it'
+    super.baseUrl = 'https://openrouter.ai/api/v1',
+    super.timeoutDuration,
+  });
+
+  // Helper to get common headers
+  Map<String, String> _getHeaders() {
+    final headers = {
+        'Authorization': 'Bearer $apiKey',
+        'Content-Type': 'application/json',
+        // Optional headers for OpenRouter ranking/identification
+        // You can remove these if you don't need them or make them dynamic
+        'HTTP-Referer': _siteUrl,
+        'X-Title': _siteTitle,
+    };
+    // Remove headers if their values are placeholders or empty
+    headers.removeWhere((key, value) => value.startsWith('<') || value.isEmpty);
+    return headers;
+  }
+
+
+  @override
+  Future<GeneratedContent> generateContent(
+    List<Content> contents, {
+    GenerationConfig? config,
+  }) async {
+    final effectiveConfig = config ?? GenerationConfig();
+    final Uri uri = Uri.parse('$baseUrl/chat/completions');
+    final Map<String, dynamic> body = {
+      'model': modelName,
+      'messages': contents.map((e) => e.toJson()).toList(),
+      ...effectiveConfig.toJson(),
+      'stream': false,
+    };
+
+    logger.d('OpenRouter Request Body: ${json.encode(body)}');
+    final headers = _getHeaders()..addAll({'Accept': 'application/json'});
+
+    try {
+      final response = await http.post(
+        uri,
+        headers: headers,
+        body: json.encode(body),
+      ).timeout(timeoutDuration);
+
+      logger.d('OpenRouter Response Status: ${response.statusCode}');
+
+      if (response.statusCode != 200) {
+         logger.e('OpenRouter Error (${response.statusCode}): ${response.body}');
+        throw LlmException('Failed to generate content: ${response.statusCode}', underlyingError: response.body);
+      }
+
+      final Map<String, dynamic> data = json.decode(utf8.decode(response.bodyBytes));
+      String responseText = '';
+
+      // Standard OpenAI-compatible response structure
+      if (data.containsKey('choices') &&
+          data['choices'] is List &&
+          data['choices'].isNotEmpty &&
+          data['choices'][0].containsKey('message') &&
+          data['choices'][0]['message'].containsKey('content')) {
+        responseText = data['choices'][0]['message']['content'] ?? '';
+         logger.d('OpenRouter Response Text extracted successfully.');
+      } else {
+         logger.w('OpenRouter Response missing expected content structure: $data');
+      }
+
+      return GeneratedContent(
+        text: responseText,
+        rawResponse: data, // Include usage if available: data['usage']
+      );
+    } on TimeoutException catch (e, s) {
+        logger.e('OpenRouter generateContent request timed out', error: e, stackTrace: s);
+        throw LlmException('Request timed out', underlyingError: e);
+    } catch (e, s) {
+      logger.e('OpenRouter generateContent failed', error: e, stackTrace: s);
+      throw LlmException('Failed during content generation', underlyingError: e);
+    }
+  }
+
+  @override
+  Stream<GeneratedContent> generateContentStream(
+    List<Content> contents, {
+    GenerationConfig? config,
+  }) async* {
+    final effectiveConfig = config ?? GenerationConfig();
+    final Uri uri = Uri.parse('$baseUrl/chat/completions');
+    final Map<String, dynamic> body = {
+      'model': modelName,
+      'messages': contents.map((e) => e.toJson()).toList(),
+      ...effectiveConfig.toJson(),
+      'stream': true,
+    };
+
+    final headers = _getHeaders()..addAll({'Accept': 'text/event-stream'});
+    final request = http.Request('POST', uri)
+      ..headers.addAll(headers)
+      ..body = json.encode(body);
+
+    logger.d('OpenRouter Streaming Request to $uri');
+    http.StreamedResponse? streamedResponse;
+
+    try {
+      streamedResponse = await request.send().timeout(timeoutDuration);
+
+      logger.d('OpenRouter Stream Response Status: ${streamedResponse.statusCode}');
+
+      if (streamedResponse.statusCode != 200) {
+        final response = await http.Response.fromStream(streamedResponse);
+         logger.e('OpenRouter Stream Error (${response.statusCode}): ${response.body}');
+        throw LlmException('Failed to initiate stream: ${response.statusCode}', underlyingError: response.body);
+      }
+
+      String accumulatedText = '';
+      String residualData = ''; // Buffer for incomplete lines
+
+      // Standard SSE parsing logic (same as NVIDIA/Groq)
+      await for (final chunkBytes
+          in streamedResponse.stream.timeout(timeoutDuration)) {
+        final chunk = residualData + utf8.decode(chunkBytes, allowMalformed: true);
+        final lines = chunk.split('\n');
+        residualData = lines.removeLast();
+
+        for (final line in lines) {
+           if (line.isEmpty) continue;
+           logger.v('OpenRouter Stream Line: $line'); // Verbose
+
+          if (line == 'data: [DONE]') {
+             logger.d('OpenRouter Stream received [DONE] marker.');
+            // Yield final usage info if needed (would parse from last non-DONE chunk)
+            yield GeneratedContent(text: accumulatedText, isComplete: true);
+            return;
+          }
+
+          if (line.startsWith('data: ')) {
+            final jsonData = line.substring(6);
+            if (jsonData.isEmpty) continue;
+
+            try {
+              final Map<String, dynamic> data = json.decode(jsonData);
+
+              // Check for usage info in the stream (usually comes at the end)
+              if (data.containsKey('usage')) {
+                  logger.d('OpenRouter Stream received usage data: ${data['usage']}');
+                  // Could potentially yield this separately if needed
+              }
+
+              if (data.containsKey('choices') &&
+                  data['choices'] is List &&
+                  data['choices'].isNotEmpty) {
+                final choice = data['choices'][0];
+
+                // Standard delta extraction
+                if (choice.containsKey('delta') &&
+                    choice['delta'].containsKey('content') &&
+                    choice['delta']['content'] != null) {
+                  final String deltaContent = choice['delta']['content'];
+                  accumulatedText += deltaContent;
+                  yield GeneratedContent(
+                    text: accumulatedText,
+                    isComplete: false,
+                    rawResponse: data,
+                  );
+                }
+                 // Check for finish reason
+                 if (choice.containsKey('finish_reason') && choice['finish_reason'] != null) {
+                    logger.d('OpenRouter Stream finish reason: ${choice['finish_reason']}');
+                 }
+                 // Check for native finish reason if provided by OpenRouter
+                 if (choice.containsKey('native_finish_reason') && choice['native_finish_reason'] != null) {
+                    logger.d('OpenRouter Stream native finish reason: ${choice['native_finish_reason']}');
+                 }
+              }
+            } on FormatException catch (e) {
+               logger.w('OpenRouter Stream - Failed to decode JSON chunk: "$jsonData"', error: e);
+               continue;
+            }
+          }
+        }
+      }
+
+       logger.d('OpenRouter Stream finished without [DONE] marker. Yielding final content.');
+       // Might have usage info in the last raw response if needed
+      yield GeneratedContent(text: accumulatedText, isComplete: true);
+
+    } on TimeoutException catch (e, s) {
+        logger.e('OpenRouter generateContentStream request or stream timed out', error: e, stackTrace: s);
+        throw LlmException('Stream timed out', underlyingError: e);
+    } catch (e, s) {
+      logger.e('OpenRouter generateContentStream failed', error: e, stackTrace: s);
+      throw LlmException('Failed during stream processing', underlyingError: e);
+    }
+  }
+}
+
+
 /// Factory for creating LLM clients based on provider
 class LlmClientFactory {
   static BaseLlmClient createClient({
@@ -703,6 +908,12 @@ class LlmClientFactory {
         );
       case LlmProvider.gemini:
         return GeminiLlmClient(
+          apiKey: apiKey,
+          modelName: modelName,
+           timeoutDuration: effectiveTimeout,
+        );
+      case LlmProvider.openrouter:
+        return OpenRouterLlmClient(
           apiKey: apiKey,
           modelName: modelName,
            timeoutDuration: effectiveTimeout,
@@ -829,54 +1040,112 @@ class KmlGeneratorService {
 
   KmlGeneratorService({required this.llm});
 
-  /// Generate KML from a user query
-  Future<String> generateKml(String query) async {
-   _log.i("Attempting to generate KML for query: '$query'");
-  try {
-     // --- MODIFICATION START ---
-    List<Content> requestContents;
-    if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
-         _log.w("NVIDIA Gemma2 model detected: Combining system prompt into user message as system role is not supported.");
-         // Combine system prompt and user query into a single user message
-        requestContents = [
-            Content.user(
-              '$_kmlSystemPrompt\n\n'
-              '---\n\n' // Separator
-              'User Request:\n'
-              '$query'
-            )
-        ];
-    } else {
-        // Standard approach
-        requestContents = [
-            Content.system(_kmlSystemPrompt),
-            Content.user(query),
-        ];
-    }
-     // --- MODIFICATION END ---
+  /// Helper to extract KML block from potentially noisy LLM response
+  String _extractKmlBlock(String rawResponse) {
+    String content = rawResponse.trim();
+    _log.d("Attempting to extract KML from raw response (length: ${content.length})");
 
-    final response = await llm.generateContent(requestContents); // Use modified contents
+    // 1. Remove potential markdown fences (```xml ... ``` or ``` ... ```)
+    if (content.startsWith('```') && content.endsWith('```')) {
+      _log.d("Detected Markdown fences around KML. Removing.");
+      // Find the first newline to skip ``` or ```xml
+      int firstNewline = content.indexOf('\n');
+      if (firstNewline != -1) {
+        content = content.substring(firstNewline + 1);
+      }
+      // Find the last ```
+      int lastFence = content.lastIndexOf('```');
+      if (lastFence != -1) {
+        content = content.substring(0, lastFence).trim();
+      }
+    } else if (content.startsWith('```xml')) {
+         _log.d("Detected starting ```xml fence. Removing.");
+         int firstNewline = content.indexOf('\n');
+         if (firstNewline != -1) {
+            content = content.substring(firstNewline + 1).trim();
+         }
+     }
+    // Add more sophisticated cleaning here if needed (e.g., removing leading/trailing text)
 
-    final kmlContent = response.text.trim();
-
-    if (kmlContent.isEmpty) {
-       _log.w("KML Generation resulted in empty content.");
-       throw KmlGenerationException("Received empty content from LLM for KML generation.");
+    // 2. Find the start of the KML declaration or root tag
+    int startIndex = content.indexOf('<?xml');
+    if (startIndex == -1) {
+      startIndex = content.indexOf('<kml');
     }
 
-    _validateKml(kmlContent);
+    if (startIndex == -1) {
+      _log.w("Could not find start tag ('<?xml' or '<kml') in cleaned response. Raw response might lack KML.");
+      // Return the (potentially cleaned) content for validation to fail explicitly
+      // or throw a specific exception here. For now, let validation handle it.
+      return content;
+    }
 
-    _log.i("KML generated and validated successfully.");
-    return kmlContent;
+    // If the start tag isn't at the beginning, log a warning and trim preceding text
+    if (startIndex > 0) {
+        _log.w("Found KML start tag after some preceding text. Trimming text before index $startIndex.");
+        content = content.substring(startIndex);
+        startIndex = 0; // Reset start index after trimming
+    }
 
-  } on LlmException catch (e) {
-     _log.e("LLM error during KML generation", error: e, stackTrace: StackTrace.current);
-     throw KmlGenerationException("LLM failed during KML generation", underlyingError: e);
-  } catch (e, s) {
-    _log.e("Unexpected error during KML generation/validation", error: e, stackTrace: s);
-     throw KmlGenerationException("Failed to generate or validate KML", underlyingError: e);
+
+    // 3. Find the last closing KML tag
+    int endIndex = content.lastIndexOf('</kml>');
+    if (endIndex == -1) {
+      _log.w("Could not find closing tag ('</kml>') after start tag in response.");
+      // Return the content starting from the found tag, let validation handle missing end
+      return content; // Return from start index onwards
+    }
+
+    // 4. Extract the substring up to and including the closing tag
+    String extractedKml = content.substring(startIndex, endIndex + '</kml>'.length);
+    _log.i("Extracted potential KML block (length: ${extractedKml.length}).");
+    return extractedKml;
   }
-}
+
+    /// Generate KML from a user query
+  Future<String> generateKml(String query) async {
+    _log.i("Attempting to generate KML for query: '$query'");
+    try {
+      // --- NVIDIA System Prompt Workaround ---
+      List<Content> requestContents;
+      if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
+           _log.w("NVIDIA Gemma2 model detected: Combining system prompt into user message.");
+           requestContents = [ Content.user('$_kmlSystemPrompt\n\n---\n\nUser Request:\n$query') ];
+      } else {
+           requestContents = [ Content.system(_kmlSystemPrompt), Content.user(query) ];
+      }
+      // --- End Workaround ---
+
+      final response = await llm.generateContent(requestContents);
+      final rawResponseText = response.text; // Get raw text
+
+      if (rawResponseText.trim().isEmpty) {
+         _log.w("KML Generation resulted in empty content.");
+         throw KmlGenerationException("Received empty content from LLM for KML generation.");
+      }
+
+      // --- USE THE HELPER TO EXTRACT ---
+      final extractedKmlContent = _extractKmlBlock(rawResponseText);
+      // --- EXTRACTION DONE ---
+
+      // Validate the *extracted* content
+      _validateKml(extractedKmlContent);
+
+      _log.i("KML generated and validated successfully.");
+      return extractedKmlContent; // Return the extracted & validated KML
+
+    } on KmlValidationException catch (e) { // Catch validation error specifically
+        _log.e("KML Validation failed after generation", error: e);
+        // Rethrow or wrap
+        throw KmlGenerationException("Generated content failed KML validation", underlyingError: e);
+    } on LlmException catch (e) {
+       _log.e("LLM error during KML generation", error: e, stackTrace: StackTrace.current);
+       throw KmlGenerationException("LLM failed during KML generation", underlyingError: e);
+    } catch (e, s) { // Catch other errors (like extraction issues if helper threw)
+      _log.e("Unexpected error during KML generation/validation", error: e, stackTrace: s);
+       throw KmlGenerationException("Failed to generate or validate KML", underlyingError: e);
+    }
+  }
 
   /// Validate KML structure. Throws KmlValidationException if invalid.
     /// Validate KML structure. Throws KmlValidationException if invalid.
@@ -904,56 +1173,72 @@ class KmlGeneratorService {
 
 
   /// Generate KML with streaming for progress updates
-  /// Returns stream of KML text chunks. Throws exceptions on error.
-   Stream<String> generateKmlStream(String query) async* {
+    /// Generate KML with streaming. Yields final validated KML string or throws error.
+  Stream<String> generateKmlStream(String query) async* {
     _log.i("Attempting to generate KML stream for query: '$query'");
     String accumulatedContent = '';
+    bool streamCompleted = false; // Flag to ensure we process only once
 
     try {
-      // --- MODIFICATION START ---
+      // --- NVIDIA System Prompt Workaround ---
       List<Content> requestContents;
       if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
           _log.w("NVIDIA Gemma2 stream model detected: Combining system prompt into user message.");
-          requestContents = [
-              Content.user(
-                '$_kmlSystemPrompt\n\n'
-                '---\n\n' // Separator
-                'User Request:\n'
-                '$query'
-              )
-          ];
+          requestContents = [ Content.user('$_kmlSystemPrompt\n\n---\n\nUser Request:\n$query') ];
       } else {
-          requestContents = [
-              Content.system(_kmlSystemPrompt),
-              Content.user(query),
-          ];
+          requestContents = [ Content.system(_kmlSystemPrompt), Content.user(query) ];
       }
-      // --- MODIFICATION END ---
+      // --- End Workaround ---
 
-      // Use modified contents
       await for (final chunk in llm.generateContentStream(requestContents)) {
-        accumulatedContent = chunk.text;
-        yield accumulatedContent;
+        accumulatedContent = chunk.text; // Keep accumulating the raw text
 
-        if (chunk.isComplete) {
-           _log.i("KML Stream finished. Validating final content.");
-           try {
-              _validateKml(accumulatedContent);
-               _log.i("Final KML stream content validated successfully.");
-           } catch (validationError) {
-               _log.w("Final KML stream content failed validation.", error: validationError);
-               rethrow;
+        // Only process when the stream indicates completion
+        if (chunk.isComplete && !streamCompleted) {
+           streamCompleted = true; // Prevent multiple processing attempts
+           _log.i("KML Stream finished. Extracting and validating final content.");
+
+           // --- USE THE HELPER TO EXTRACT ---
+           final extractedKmlContent = _extractKmlBlock(accumulatedContent);
+           // --- EXTRACTION DONE ---
+
+           if (extractedKmlContent.trim().isEmpty) {
+              _log.w("Extracted KML content is empty.");
+              throw KmlValidationException("Extracted KML content was empty after streaming.");
            }
+
+           _validateKml(extractedKmlContent); // Validate the extracted KML
+           _log.i("Final KML stream content validated successfully.");
+
+           // Yield the single, final, validated KML string
+           yield extractedKmlContent;
         }
+        // NOTE: We are NOT yielding intermediate chunks anymore.
+        // This stream now only yields the final validated KML string.
+        // If you need progress updates, use a different Stream type (e.g., Stream<KmlProgressUpdate>)
       }
+
+      // Handle case where stream ends without isComplete flag (less common)
+       if (!streamCompleted) {
+          _log.w("KML Stream ended without 'isComplete' flag. Attempting final processing.");
+          streamCompleted = true;
+          final extractedKmlContent = _extractKmlBlock(accumulatedContent);
+          if (extractedKmlContent.trim().isEmpty) {
+             throw KmlValidationException("Extracted KML content was empty after stream ended unexpectedly.");
+          }
+          _validateKml(extractedKmlContent);
+          _log.i("Processed final KML content after unexpected stream end.");
+          yield extractedKmlContent;
+       }
+
+    } on KmlValidationException catch (e) { // Catch validation errors specifically
+        _log.e("KML Validation failed after stream completion", error: e);
+        throw KmlGenerationException("Streamed content failed KML validation", underlyingError: e);
     } on LlmException catch (e) {
        _log.e("LLM error during KML stream generation", error: e, stackTrace: StackTrace.current);
        throw KmlGenerationException("LLM failed during KML stream generation", underlyingError: e);
     } catch (e, s) {
-      _log.e("Unexpected error during KML stream", error: e, stackTrace: s);
-      if (e is KmlValidationException) {
-        rethrow;
-      }
+      _log.e("Unexpected error during KML stream processing", error: e, stackTrace: s);
       throw KmlGenerationException("Failed during KML stream processing", underlyingError: e);
     }
   }
@@ -1108,6 +1393,7 @@ class ApiKeyManager {
   static const String _nvidiaKeyPref = 'llm_nvidia_api_key';
   static const String _groqKeyPref = 'llm_groq_api_key';
   static const String _geminiKeyPref = 'llm_gemini_api_key';
+  static const String _openrouterKeyPref = 'llm_openrouter_api_key';
   static const String _activeProviderPref = 'llm_active_provider_index';
 
   /// Save API key securely
@@ -1117,6 +1403,7 @@ class ApiKeyManager {
       case LlmProvider.nvidia: key = _nvidiaKeyPref; break;
       case LlmProvider.groq: key = _groqKeyPref; break;
       case LlmProvider.gemini: key = _geminiKeyPref; break;
+      case LlmProvider.openrouter: key = _openrouterKeyPref; break;
     }
     try {
        await _secureStorage.write(key: key, value: apiKey);
@@ -1134,6 +1421,7 @@ class ApiKeyManager {
       case LlmProvider.nvidia: key = _nvidiaKeyPref; break;
       case LlmProvider.groq: key = _groqKeyPref; break;
       case LlmProvider.gemini: key = _geminiKeyPref; break;
+      case LlmProvider.openrouter: key = _openrouterKeyPref; break;
     }
     try {
        final apiKey = await _secureStorage.read(key: key);
@@ -1197,7 +1485,8 @@ class ApiKeyManager {
     switch (provider) {
       case LlmProvider.nvidia: modelName = 'google/gemma-2-27b-it'; break;
       case LlmProvider.groq: modelName = 'gemma2-9b-it'; break;
-      case LlmProvider.gemini: modelName = 'gemma2-9b-it'; break; // Use flash for faster classification? Or 1.5-pro?
+      case LlmProvider.gemini: modelName = 'gemma2-27b-it'; break;
+      case LlmProvider.openrouter: modelName = 'google/gemma-3-27b-it:free'; break;
     }
 
     try {
