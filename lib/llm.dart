@@ -831,37 +831,52 @@ class KmlGeneratorService {
 
   /// Generate KML from a user query
   Future<String> generateKml(String query) async {
-     _log.i("Attempting to generate KML for query: '$query'");
-    try {
-      final response = await llm.generateContent([
-        Content.system(_kmlSystemPrompt),
-        Content.user(query),
-      ]);
-
-      final kmlContent = response.text.trim();
-
-      if (kmlContent.isEmpty) {
-         _log.w("KML Generation resulted in empty content.");
-         throw KmlGenerationException("Received empty content from LLM for KML generation.");
-      }
-
-      // Validate KML
-      _validateKml(kmlContent); // Throws KmlValidationException on failure
-
-      _log.i("KML generated and validated successfully.");
-      return kmlContent;
-
-    } on LlmException catch (e) {
-       _log.e("LLM error during KML generation", error: e, stackTrace: StackTrace.current);
-       // Re-throw as a more specific exception if needed, or keep LlmException
-       throw KmlGenerationException("LLM failed during KML generation", underlyingError: e);
-    } catch (e, s) {
-      // Catch potential validation errors or other unexpected issues
-      _log.e("Unexpected error during KML generation/validation", error: e, stackTrace: s);
-      // Throw a specific KML generation exception
-       throw KmlGenerationException("Failed to generate or validate KML", underlyingError: e);
+   _log.i("Attempting to generate KML for query: '$query'");
+  try {
+     // --- MODIFICATION START ---
+    List<Content> requestContents;
+    if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
+         _log.w("NVIDIA Gemma2 model detected: Combining system prompt into user message as system role is not supported.");
+         // Combine system prompt and user query into a single user message
+        requestContents = [
+            Content.user(
+              '$_kmlSystemPrompt\n\n'
+              '---\n\n' // Separator
+              'User Request:\n'
+              '$query'
+            )
+        ];
+    } else {
+        // Standard approach
+        requestContents = [
+            Content.system(_kmlSystemPrompt),
+            Content.user(query),
+        ];
     }
+     // --- MODIFICATION END ---
+
+    final response = await llm.generateContent(requestContents); // Use modified contents
+
+    final kmlContent = response.text.trim();
+
+    if (kmlContent.isEmpty) {
+       _log.w("KML Generation resulted in empty content.");
+       throw KmlGenerationException("Received empty content from LLM for KML generation.");
+    }
+
+    _validateKml(kmlContent);
+
+    _log.i("KML generated and validated successfully.");
+    return kmlContent;
+
+  } on LlmException catch (e) {
+     _log.e("LLM error during KML generation", error: e, stackTrace: StackTrace.current);
+     throw KmlGenerationException("LLM failed during KML generation", underlyingError: e);
+  } catch (e, s) {
+    _log.e("Unexpected error during KML generation/validation", error: e, stackTrace: s);
+     throw KmlGenerationException("Failed to generate or validate KML", underlyingError: e);
   }
+}
 
   /// Validate KML structure. Throws KmlValidationException if invalid.
     /// Validate KML structure. Throws KmlValidationException if invalid.
@@ -890,30 +905,44 @@ class KmlGeneratorService {
 
   /// Generate KML with streaming for progress updates
   /// Returns stream of KML text chunks. Throws exceptions on error.
-  Stream<String> generateKmlStream(String query) async* {
+   Stream<String> generateKmlStream(String query) async* {
     _log.i("Attempting to generate KML stream for query: '$query'");
     String accumulatedContent = '';
 
     try {
-      await for (final chunk in llm.generateContentStream([
-        Content.system(_kmlSystemPrompt),
-        Content.user(query),
-      ])) {
+      // --- MODIFICATION START ---
+      List<Content> requestContents;
+      if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
+          _log.w("NVIDIA Gemma2 stream model detected: Combining system prompt into user message.");
+          requestContents = [
+              Content.user(
+                '$_kmlSystemPrompt\n\n'
+                '---\n\n' // Separator
+                'User Request:\n'
+                '$query'
+              )
+          ];
+      } else {
+          requestContents = [
+              Content.system(_kmlSystemPrompt),
+              Content.user(query),
+          ];
+      }
+      // --- MODIFICATION END ---
+
+      // Use modified contents
+      await for (final chunk in llm.generateContentStream(requestContents)) {
         accumulatedContent = chunk.text;
-        yield accumulatedContent; // Yield the current accumulated text
+        yield accumulatedContent;
 
         if (chunk.isComplete) {
            _log.i("KML Stream finished. Validating final content.");
            try {
-              _validateKml(accumulatedContent); // Validate final content
+              _validateKml(accumulatedContent);
                _log.i("Final KML stream content validated successfully.");
            } catch (validationError) {
                _log.w("Final KML stream content failed validation.", error: validationError);
-               // Depending on desired behavior, you might:
-               // 1. Stop the stream here.
-               // 2. Yield an error marker (not standard for Stream<String>).
-               // 3. Throw the validation error, stopping the stream consumer.
-               throw validationError; // Rethrow validation error
+               rethrow;
            }
         }
       }
@@ -922,9 +951,8 @@ class KmlGeneratorService {
        throw KmlGenerationException("LLM failed during KML stream generation", underlyingError: e);
     } catch (e, s) {
       _log.e("Unexpected error during KML stream", error: e, stackTrace: s);
-       // Includes potential validation errors rethrown from the end of the stream
       if (e is KmlValidationException) {
-        rethrow; // Preserve the specific validation error
+        rethrow;
       }
       throw KmlGenerationException("Failed during KML stream processing", underlyingError: e);
     }
@@ -972,44 +1000,94 @@ Ensure the output is ONLY the JSON object, nothing else before or after.
   Future<Map<String, dynamic>> classifyIntent(String voiceCommand) async {
      _log.i("Attempting to classify intent for command: '$voiceCommand'");
     try {
-      final response = await llm.generateContent([
-        Content.system(_intentSystemPrompt),
-        Content.user(voiceCommand),
-      ]);
+      // --- MODIFICATION FOR NVIDIA SYSTEM ROLE (Keep this) ---
+      List<Content> requestContents;
+      if (llm is NvidiaLlmClient && llm.modelName == 'google/gemma-2-27b-it') {
+        _log.w("NVIDIA Gemma2 model detected: Combining system prompt into user message as system role is not supported.");
+        requestContents = [
+          Content.user(
+            '$_intentSystemPrompt\n\n'
+            '---\n\n' // Clear separator
+            'User Request:\n'
+            '$voiceCommand'
+          )
+        ];
+      } else {
+        requestContents = [
+          Content.system(_intentSystemPrompt),
+          Content.user(voiceCommand),
+        ];
+      }
+      // --- END MODIFICATION FOR NVIDIA SYSTEM ROLE ---
 
-      final jsonContent = response.text.trim();
-       _log.d("Raw intent classification response: $jsonContent");
+      final response = await llm.generateContent(requestContents);
 
-      if (jsonContent.isEmpty) {
-         _log.w("Intent classification returned empty content.");
+      // --- MODIFICATION FOR RESPONSE CLEANING (New) ---
+      String rawResponseText = response.text; // Get the raw text
+      String cleanedJsonContent = rawResponseText.trim(); // Trim whitespace first
+      _log.d("Raw intent classification response: $cleanedJsonContent");
+
+      // Remove potential Markdown code fences
+      // Handles ```json ... ``` or just ``` ... ```
+      if (cleanedJsonContent.startsWith('```') && cleanedJsonContent.endsWith('```')) {
+          _log.d("Detected Markdown fences. Attempting to remove them.");
+          // Remove the first line if it's ```json or ```
+          cleanedJsonContent = cleanedJsonContent.substring(cleanedJsonContent.indexOf('\n') + 1);
+          // Remove the last line ```
+          cleanedJsonContent = cleanedJsonContent.substring(0, cleanedJsonContent.lastIndexOf('```')).trim();
+      }
+      // Optional: Add more robust regex if needed, but this handles the common case.
+      // Example Regex approach (more complex):
+      // final regex = RegExp(r"```(?:json)?\s*([\s\S]*?)\s*```");
+      // final match = regex.firstMatch(cleanedJsonContent);
+      // if (match != null && match.groupCount >= 1) {
+      //   cleanedJsonContent = match.group(1)!.trim();
+      //   _log.d("Extracted JSON using regex.");
+      // }
+
+
+      // --- END MODIFICATION FOR RESPONSE CLEANING ---
+
+      if (cleanedJsonContent.isEmpty) {
+         _log.w("Intent classification returned empty content (after cleaning).");
          throw IntentClassificationException("Received empty content from LLM for intent classification.");
       }
 
+       _log.d("Cleaned intent classification response for parsing: $cleanedJsonContent"); // Log the potentially cleaned string
+
       Map<String, dynamic> intentData;
       try {
-        intentData = json.decode(jsonContent);
-      } on FormatException catch (e) {
-         _log.e("Failed to parse intent JSON: '$jsonContent'", error: e);
-         // Attempt to recover or return UNKNOWN
-          throw IntentClassificationException("LLM returned invalid JSON for intent", underlyingError: {'rawResponse': jsonContent, 'error': e});
+        // Parse the cleaned string
+        intentData = json.decode(cleanedJsonContent);
+      } on FormatException catch (e, s) { // Include stack trace
+         _log.e("Failed to parse intent JSON after cleaning: '$cleanedJsonContent'", error: e, stackTrace: s);
+         // Throw exception with more context
+          throw IntentClassificationException(
+            "LLM returned invalid JSON for intent (parsing failed after cleaning)",
+            underlyingError: {
+              'rawResponse': rawResponseText, // Include original raw response
+              'cleanedResponse': cleanedJsonContent,
+              'error': e.toString()
+            }
+          );
       }
 
       // --- Intent JSON Robustness Check ---
-      if (intentData is Map && intentData.containsKey('intent') && intentData['intent'] is String) {
+      if (intentData.containsKey('intent') && intentData['intent'] is String) {
          _log.i("Intent classified successfully as: ${intentData['intent']}");
         return intentData;
       } else {
         _log.w("Intent JSON is valid but lacks 'intent' key or it's not a string. Data: $intentData");
-        // Return UNKNOWN or throw, based on desired strictness
         return {
           'intent': 'UNKNOWN',
           'error': 'LLM response missing valid intent key.',
-          'rawResponse': jsonContent,
+          'rawResponse': rawResponseText, // Keep original raw response for context
           'parsedJson': intentData,
         };
-         // OR: throw IntentClassificationException("LLM response missing valid intent key.", underlyingError: {'rawResponse': jsonContent, 'parsedJson': intentData});
       }
 
+    } on IntentClassificationException { // Catch specific exception first if rethrowing
+        rethrow;
     } on LlmException catch (e) {
         _log.e("LLM error during intent classification", error: e, stackTrace: StackTrace.current);
         throw IntentClassificationException("LLM failed during intent classification", underlyingError: e);
