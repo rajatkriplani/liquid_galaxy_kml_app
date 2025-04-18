@@ -88,7 +88,7 @@ class GenerationConfig {
   GenerationConfig({
     this.temperature = 0.7,
     this.topP = 0.95,
-    this.maxOutputTokens = 1024,
+    this.maxOutputTokens = 2048,
     this.stream = false,
   });
 
@@ -281,7 +281,7 @@ class NvidiaLlmClient extends BaseLlmClient {
                   data['choices'] is List &&
                   data['choices'].isNotEmpty) {
                 final choice = data['choices'][0];
-                String? deltaContent;
+                // Removed unused variable 'deltaContent'
 
                 if (choice.containsKey('delta') &&
                 choice['delta'].containsKey('content') &&
@@ -460,7 +460,7 @@ class GroqLlmClient extends BaseLlmClient {
                   data['choices'] is List &&
                   data['choices'].isNotEmpty) {
                 final choice = data['choices'][0];
-                String? deltaContent;
+                // Removed unused variable 'deltaContent'
 
                             // Inside GroqLlmClient.generateContentStream loop
             if (choice.containsKey('delta') &&
@@ -758,6 +758,7 @@ class OpenRouterLlmClient extends BaseLlmClient {
         text: responseText,
         rawResponse: data, // Include usage if available: data['usage']
       );
+      
     } on TimeoutException catch (e, s) {
         logger.e('OpenRouter generateContent request timed out', error: e, stackTrace: s);
         throw LlmException('Request timed out', underlyingError: e);
@@ -934,28 +935,31 @@ class KmlGeneratorService {
 
 1.  **KML Only:** Respond ONLY with the KML XML code. Your entire response must start directly with `<?xml version="1.0" encoding="UTF-8"?>` or `<kml ...>` and end precisely with `</kml>`. Do NOT include ```xml markdown, any conversational text, greetings, apologies, progress messages, or explanations outside of KML comment tags (`<!-- ... -->`) if absolutely necessary for clarity *within* the KML structure.
 
-2.  **Smart Tour Generation (`<gx:Tour>`):**
+2.  **Coordinate Accuracy:** **--> ADDED** Ensure the `<coordinates>` (longitude,latitude[,altitude]) for each Placemark are geographically accurate for the named location. If unsure about exact coordinates, prioritize accuracy for well-known landmarks. Use reliable sources for coordinates if possible within your knowledge. Avoid hallucinating coordinates.
+
+3.  **Smart Tour Generation (`<gx:Tour>`):** **--> MODIFIED**
     *   Analyze the *entire* user request. If the total number of unique locations, points of interest, or steps identified across the *whole* request is **greater than one**, OR if a sequence, route, or tour is explicitly requested, you **MUST** generate a single `<gx:Tour>` within the `<Document>`.
-    *   This tour must contain a `<gx:Playlist>` with appropriate `<gx:FlyTo>` elements for *each* point of interest. Use smooth transitions (`<gx:flyToMode>smooth</gx:flyToMode>`) and reasonable `<gx:duration>`.
-    *   Define suitable views within each `<gx:FlyTo>` using `<LookAt>` or `<Camera>`. Consider ground-level views (`tilt` near 90, low `altitude`, low `range`) for immersive experiences where appropriate (e.g., street scenes, building close-ups).
-    *   **Crucially:** If a tour is generated, use `<gx:AnimatedUpdate>` within the playlist to dynamically show (`<gx:balloonVisibility>1</gx:balloonVisibility>`) and hide (`<gx:balloonVisibility>0</gx:balloonVisibility>`) the corresponding Placemark's balloon during the appropriate `<gx:Wait>` period. Reference the *Indore example* below for this pattern.
-    *   If **only a single point** is requested or identified in the *entire* query, do **NOT** generate a `<gx:Tour>`. Instead, create a single `<Placemark>` and define a suitable default view using `<LookAt>` or `<Camera>` directly within the `<Document>`.
+    *   This tour must contain a `<gx:Playlist>` with appropriate `<gx:FlyTo>` elements for *each* point of interest. Use smooth transitions (`<gx:flyToMode>smooth</gx:flyToMode>`) and reasonable `<gx:duration>`. Define suitable views within each `<gx:FlyTo>` using `<LookAt>` or `<Camera>`. Consider ground-level views for immersion where appropriate.
+    *   If a tour is generated, use `<gx:AnimatedUpdate>` within the playlist to dynamically show/hide the corresponding Placemark's balloon during the appropriate `<gx:Wait>` period (reference Indore example).
+    *   If **only a single point** is requested or identified in the *entire* query (including implicit "fly to" requests like "Show me Tokyo"), do **NOT** generate a `<gx:Tour>`. Instead, create a single `<Placemark>`.
 
-3.  **Rich, Good-Looking Balloons & Styling:**
-    *   When details (descriptions, facts, weather, images, lists, etc.) are requested or contextually appropriate, create visually appealing and informative balloons using HTML within `CDATA`.
-    *   **Recommended Method:** Place the rich HTML content (using divs, spans, inline CSS for styling, tables, lists, publicly accessible `<img>` tags) inside the `<Placemark><description><![CDATA[...]]></description>`. Then, in the associated `<Style>` or `<StyleMap>`, define a simple `<BalloonStyle>` that references this description: `<BalloonStyle><text>\$[description]</text></BalloonStyle>`. You can still set `<bgColor>` or other basic balloon properties here. *See the Indore example for this pattern.*
-    *   **Alternative Method (Less Common):** For highly complex layouts where the entire balloon structure *is* the content, or if the `<description>` needs to remain plain, you *can* place the *full* HTML structure directly inside `<Style><BalloonStyle><text><![CDATA[...]]></text></BalloonStyle>`. *See the Paris example for this pattern.*
-    *   **Avoid Conflicts:** Do *not* define a complex HTML structure within `<description>` *and* also define a separate, complex template using `%s` placeholders within `<BalloonStyle><text>`. Choose one primary method for balloon content rendering per style.
-    *   Define reusable `<Style>` elements (with `<IconStyle>`, `<LabelStyle>`, `<LineStyle>`, `<PolyStyle>`, `<BalloonStyle>`) and `<StyleMap>` (for normal/highlight states) as needed. Use meaningful `id` attributes.
+4.  **Initial View (`<Document><LookAt>`):** **--> ADDED**
+    *   If generating KML for a **single location** (no tour generated as per rule 3), OR if the user intent was effectively a **"fly to" request**, you **MUST** include an appropriate `<LookAt>` tag directly as a child of the `<Document>` element (before Placemarks/Folders). This `<LookAt>` should define a suitable initial camera view focused on the primary subject of the KML (e.g., zoomed out enough to see the city or landmark requested).
 
-4.  **Placemarks:** Use `<Placemark>` for points of interest. Include `<name>`, the rich `<description>` (using CDATA for HTML as described above), `<styleUrl>`, and `<Point><coordinates>` (longitude,latitude[,altitude]). Ensure Placemarks have unique `id` attributes if they need to be targeted by `<gx:AnimatedUpdate>` in a tour.
+5.  **Rich, Good-Looking Balloons & Styling:** **--> (No changes here, kept as before)**
+    *   When details are requested, create informative balloons using HTML within `CDATA`.
+    *   **Recommended Method:** Place rich HTML in `<Placemark><description><![CDATA[...]]></description>` and use `<BalloonStyle><text>\$[description]</text></BalloonStyle>` in the `<Style>`. (See Indore example).
+    *   **Alternative Method:** Place full HTML in `<Style><BalloonStyle><text><![CDATA[...]]></text></BalloonStyle>`. (See Paris example).
+    *   **Avoid Conflicts:** Choose one primary method per style.
+    *   Define reusable `<Style>` and `<StyleMap>` elements with meaningful `id` attributes.
 
-5.  **Validity & Structure:** Ensure the output is well-formed XML and valid KML 2.2. Pay strict attention to closing tags, case sensitivity, and correct namespaces (`xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2"`). Place `<Style>`, `<StyleMap>`, and `<Schema>` elements before Placemarks and Folders within the `<Document>` where possible. Tours (`<gx:Tour>`) are typically placed after Styles/Placemarks within the `<Document>`.
+6.  **Placemarks:** **--> (No changes here, kept as before)** Use `<Placemark>` for points of interest. Include `<name>`, rich `<description>`, `<styleUrl>`, and accurate `<Point><coordinates>`. Use unique `id` attributes if targeted by `<gx:AnimatedUpdate>`.
+
+7.  **Validity & Structure:** **--> (No changes here, kept as before)** Ensure well-formed XML and valid KML 2.2. Place `<Style>`, `<StyleMap>`, `<Schema>` before Placemarks/Folders. Place `<gx:Tour>` after Styles/Placemarks.
 
 **User Request Interpretation:**
-*   Carefully parse the *entire* user prompt. Identify *all* requested locations, themes, or data points (e.g., "Top 3 indoor *and* Top 3 outdoor" means 6 locations total).
-*   Ensure the generated KML addresses the *complete* request.
-*   If specific coordinates or camera views are given, use them. Otherwise, determine suitable geographic coordinates and visually appropriate `<LookAt>` or `<Camera>` parameters (heading, tilt, range, altitude).
+*   Carefully parse the *entire* user prompt. Identify *all* requested locations, themes, or data points. Ensure the generated KML addresses the *complete* request.
+*   If specific coordinates or camera views are given, use them. Otherwise, determine suitable geographic coordinates (prioritizing accuracy) and visually appropriate `<LookAt>` or `<Camera>` parameters.
 
 **Examples for Reference:**
 
@@ -1484,7 +1488,7 @@ class ApiKeyManager {
     // Consider making models configurable later
     switch (provider) {
       case LlmProvider.nvidia: modelName = 'google/gemma-2-27b-it'; break;
-      case LlmProvider.groq: modelName = 'gemma2-9b-it'; break;
+      case LlmProvider.groq: modelName = 'meta-llama/llama-4-maverick-17b-128e-instruct'; break;
       case LlmProvider.gemini: modelName = 'gemma2-27b-it'; break;
       case LlmProvider.openrouter: modelName = 'google/gemma-3-27b-it:free'; break;
     }

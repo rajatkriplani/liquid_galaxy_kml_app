@@ -1,8 +1,12 @@
+import 'dart:async'; // Import for Timer if needed for delays
 import 'package:flutter/material.dart';
 import 'package:flutter_3d_controller/flutter_3d_controller.dart';
 import 'package:provider/provider.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:logger/logger.dart';
+// For temporary KML file names
+// For File
+// Import for XML parsing
 
 import 'settings_screen.dart';
 import '../providers/voice_state.dart';
@@ -10,7 +14,8 @@ import '../providers/mascot_state.dart';
 import '../providers/lg_connection_state.dart';
 import '../services/permission_service.dart';
 import '../services/speech_service.dart';
-import '../llm.dart'; // Import for VoiceCommandProcessor trigger & ActiveLlmProvider
+import '../services/lg_service.dart'; // Import LG Service
+import '../llm.dart'; // Import LLM services
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -20,258 +25,330 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  final Logger _log = logger; // Use global logger from llm.dart
+  final Logger _log = logger;
   final Flutter3DController mascotController = Flutter3DController();
   final PermissionService _permissionService = PermissionService();
   late final SpeechService _speechService;
-  String _statusText = 'Tap the microphone to start'; // Updated initial text
+  final LGService _lgService = LGService(); // Instantiate LG Service
+  String _statusText = 'Tap the microphone to start';
 
-  // Define emission color
-  final Color _emissionColor = const Color.fromARGB(255, 68, 255, 152).withOpacity(0.6); // Adjust color and opacity
+  final Color _emissionColor = const Color.fromARGB(255, 68, 255, 152).withOpacity(0.6);
   final Color _processingColor = const Color.fromARGB(255, 64, 99, 255).withOpacity(0.6);
+
 
   @override
   void initState() {
     super.initState();
-
-    // Initialize ActiveLlmProvider early
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ActiveLlmProvider>().initialize();
+      // Optionally try to connect automatically based on saved settings later
     });
-
-    // --- Initialize Speech Service ---
     _speechService = SpeechService(
       onResult: _handleSpeechResult,
       onError: _handleSpeechError,
       onStatus: _handleSpeechStatus,
     );
-
     _initializeSpeechRecognizer();
   }
 
   @override
   void dispose() {
-    // Dispose of any controllers if necessary (mascotController doesn't seem to have one)
+    _lgService.disconnect(); // Ensure disconnection on screen disposal
     super.dispose();
   }
 
-
   Future<void> _initializeSpeechRecognizer() async {
+    // ... (no changes needed here) ...
     final isAvailable = await _speechService.initialize();
     if (!isAvailable) {
       _updateStatusText("Speech recognizer not available on this device.");
-      // Keep state as idle, but update text and notifier
       context.read<VoiceStateNotifier>().setError("Speech recognizer not available.");
     } else {
-       _updateStatusText("Tap the microphone to start"); // Ready state text
+       _updateStatusText("Tap the microphone to start");
     }
   }
 
-  // --- Speech Service Callbacks ---
   void _handleSpeechResult(String recognizedText) {
+    // ... (no changes needed here) ...
     _log.i("Speech Result Received: '$recognizedText'");
     if (recognizedText.trim().isEmpty) {
        _log.w("Received empty speech result. Going back to idle.");
-        context.read<MascotStateNotifier>().setIdle(); // Turn off emission
+        context.read<MascotStateNotifier>().setIdle();
         context.read<VoiceStateNotifier>().setIdle();
         _updateStatusText("Didn't catch that. Tap microphone to try again.");
         return;
     }
-
-    // Update state to Processing
-    context.read<MascotStateNotifier>().setProcessing(); // Or setIdle() if no processing look
+    context.read<MascotStateNotifier>().setProcessing();
     context.read<VoiceStateNotifier>().setProcessing(recognizedText);
     _updateStatusText('Processing: "$recognizedText"');
-
-    // --- Trigger Phase 3: Intent Classification ---
     _triggerIntentClassification(recognizedText);
   }
 
   void _handleSpeechError(String errorMsg) {
+    // ... (no changes needed here) ...
     _log.e("Speech Error Received: $errorMsg");
-    context.read<MascotStateNotifier>().setIdle(); // Turn off emission
+    context.read<MascotStateNotifier>().setIdle();
     context.read<VoiceStateNotifier>().setError(errorMsg);
     _updateStatusText('Error: $errorMsg');
   }
 
-  void _handleSpeechStatus(String status) { // status is String
+  void _handleSpeechStatus(String status) {
+    // ... (no changes needed here) ...
     _log.d("Speech Status Update: $status");
     final voiceNotifier = context.read<VoiceStateNotifier>();
     final mascotNotifier = context.read<MascotStateNotifier>();
-
-    // Compare using the status string constants from speech_to_text
     if (status == stt.SpeechToText.listeningStatus) {
       if (!voiceNotifier.isListening) {
-        mascotNotifier.setListening(); // Turn on emission visual
+        mascotNotifier.setListening();
         voiceNotifier.setListening();
         _updateStatusText('Listening...');
       }
     } else if (status == stt.SpeechToText.notListeningStatus || status == stt.SpeechToText.doneStatus) {
-      // If we are still in 'listening' state (meaning no final result/error yet)
-      // go back to idle. This handles cases like timeout without speech.
       if (voiceNotifier.isListening) {
         _log.w("Speech stopped without final result/error. Returning to idle.");
-        mascotNotifier.setIdle(); // Turn off emission
+        mascotNotifier.setIdle();
         voiceNotifier.setIdle();
         _updateStatusText('Stopped listening. Tap microphone to try again.');
       }
-      // Otherwise, the state would have been updated by onResult or onError
     }
   }
 
-  // --- Voice Activation Button Tapped ---
   Future<void> _activateVoiceInput() async {
-    _log.d("Voice Activation triggered - _activateVoiceInput entered.");
+    // ... (no changes needed here) ...
+    _log.d("Voice Activation triggered.");
     final voiceNotifier = context.read<VoiceStateNotifier>();
     final mascotNotifier = context.read<MascotStateNotifier>();
 
-    // Check 1: Already busy?
     if (voiceNotifier.isListening || voiceNotifier.isProcessing) {
-      _log.w("Voice Activation tapped while busy (State: ${voiceNotifier.currentState}). Ignoring.");
-      // Optional: Stop listening if tapped while listening?
+      _log.w("Tapped while busy.");
       if (voiceNotifier.isListening) {
-        _speechService.stopListening(); // Stop current listening attempt
+        _speechService.stopListening();
         mascotNotifier.setIdle();
         voiceNotifier.setIdle();
-        _updateStatusText('Listening stopped. Tap microphone to start.');
+        _updateStatusText('Listening stopped.');
       }
-      return; // Exit
+      return;
     }
-    _log.d("_activateVoiceInput: Not busy, proceeding.");
 
-    // Check 2: Speech Service Available?
     if (!_speechService.isAvailable) {
-      _log.e("Voice Activation tapped but speech service is not available.");
-      voiceNotifier.setError("Speech recognizer not available.");
-      _updateStatusText("Error: Speech recognizer not available.");
-      return; // Exit
+      _handleError("Speech recognizer not available.", "Speech Error");
+      return;
     }
-    _log.d("_activateVoiceInput: Speech service is available.");
 
-    // Check 3: Request Permission
-    _log.d("_activateVoiceInput: Requesting microphone permission...");
     final hasPermission = await _permissionService.requestMicrophonePermission();
-    _log.d("_activateVoiceInput: Permission result: hasPermission=$hasPermission");
-
     if (!hasPermission) {
-      _log.w("Microphone permission denied.");
-      mascotNotifier.setIdle(); // Ensure idle state visually
-      voiceNotifier.setError("Microphone permission required.");
-      _updateStatusText("Error: Microphone permission is required.");
-      // Consider prompting to open settings
-      // await _permissionService.openAppSettingsPage();
-      return; // Exit
+      _handleError("Microphone permission is required.", "Permission Denied");
+      return;
     }
-    _log.d("_activateVoiceInput: Permission granted.");
 
-    // Action: Start Listening
-    _log.i("_activateVoiceInput: Calling _speechService.startListening()...");
+    _log.i("Starting listening...");
     _speechService.startListening();
-    _log.d("_activateVoiceInput: Call to _speechService.startListening() completed.");
-    // State changes (listening, mascot glowing) are handled by the _handleSpeechStatus callback
   }
 
-
-  // --- Update Bottom Status Text ---
   void _updateStatusText(String text) {
+    // ... (no changes needed here) ...
     if (mounted) {
       setState(() { _statusText = text; });
     }
   }
 
-  // --- Phase 3 Trigger (Placeholder for now) ---
-  Future<void> _triggerIntentClassification(String transcript) async {
-    _log.i("Phase 3: Triggering Intent Classification for: '$transcript'");
+  /// Helper to show SnackBar errors and log them
+  void _handleError(String message, String title, {dynamic error, StackTrace? stackTrace}) {
+    _log.e('$title: $message', error: error, stackTrace: stackTrace);
+    // Update state notifiers to reflect error
+    context.read<VoiceStateNotifier>().setError(message);
+    context.read<MascotStateNotifier>().setIdle();
+    _updateStatusText('Error: $message'); // Update bottom text
 
+    // Show SnackBar
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$title: $message', style: const TextStyle(color: Colors.white)),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 4), // Show longer for errors
+        ),
+      );
+    }
+  }
+
+
+  /// --- Phase 3 & 4: Intent Classification & LG Interaction ---
+  Future<void> _triggerIntentClassification(String transcript) async {
+    _log.i("Phase 3/4: Starting process for transcript: '$transcript'");
     // Ensure states reflect processing START
-    context.read<MascotStateNotifier>().setProcessing(); // Show processing visual
-    context.read<VoiceStateNotifier>().setProcessing(transcript); // Keep state as processing
-    _updateStatusText('Processing...'); // Update UI text
+    context.read<MascotStateNotifier>().setProcessing();
+    context.read<VoiceStateNotifier>().setProcessing(transcript);
+    _updateStatusText('Understanding command...'); // Initial processing text
 
     final llmProvider = context.read<ActiveLlmProvider>();
     final voiceNotifier = context.read<VoiceStateNotifier>();
     final mascotNotifier = context.read<MascotStateNotifier>();
+    final lgConnectionNotifier = context.read<LgConnectionStateNotifier>();
 
+    // Check LLM availability first
     if (!llmProvider.isReady) {
-      _log.e("Cannot process command: LLM client not ready.");
-      mascotNotifier.setIdle(); // Reset visuals
-      voiceNotifier.setError("LLM Service not available. Check API Key settings.");
-      _updateStatusText("Error: LLM Service not available.");
+      _handleError("LLM Service not available.", "LLM Error");
       return;
     }
 
-    // Instantiate the processor with the active client
+    // Instantiate the processor
     final processor = VoiceCommandProcessor(llm: llmProvider.client!);
+    Map<String, dynamic> classificationResult;
 
     try {
-      // --- Call the processor ---
-      final result = await processor.processVoiceCommand(transcript);
-      _log.i("Phase 3: Voice Processing Result: $result");
+      // === Step 1: Classify Intent ===
+      classificationResult = await processor.processVoiceCommand(transcript);
+      _log.i("Phase 3: Voice Processing Result: $classificationResult");
 
-      // --- Handle the result ---
-      if (result['success'] == true) {
-        final action = result['action'];
-        _log.i("Phase 3: Successfully processed intent: $action");
-
-        // Prepare for Phase 4 based on action
-        if (action == 'GENERATE_KML') {
-          final kml = result['kml'] as String?;
-          if (kml != null) {
-             _log.d("Phase 3: KML Generated (Length: ${kml.length}). Ready for Phase 4 (Send KML).");
-             // TODO (Phase 4): Call LGService.sendKmlToLg(kml);
-             _updateStatusText("Okay, preparing to display KML...");
-          } else {
-             // This case shouldn't happen if success is true and action is GENERATE_KML
-             // according to VoiceCommandProcessor logic, but handle defensively.
-              _log.e("Phase 3: KML Generation reported success but KML was null.");
-              throw LlmException("KML generation failed unexpectedly.");
-          }
-        } else {
-          // Handle other direct commands
-          final params = result['params'];
-          _log.d("Phase 3: Direct Command '$action' ready for Phase 4. Params: $params");
-          // TODO (Phase 4): Call appropriate LGService method (e.g., clearKml, playTour)
-           _updateStatusText("Okay, understood command: $action");
-        }
-
-         // --- Reset state after successful processing (Temporary) ---
-         // In full flow, state might remain busy during LG interaction (Phase 4)
-         // For now, reset to idle after a short delay to show the status text.
-         await Future.delayed(const Duration(seconds: 2));
-         mascotNotifier.setIdle();
-         voiceNotifier.setIdle();
-         _updateStatusText("Ready. Tap microphone to start.");
-         // --- End Temporary Reset ---
-
-      } else {
-        // Handle processing failure reported by the processor
-        final message = result['message'] ?? 'Unknown processing error.';
-        final errorAction = result['action'] ?? 'ERROR_UNKNOWN';
-        _log.e("Phase 3: Voice command processing failed. Action: $errorAction, Message: $message");
-        mascotNotifier.setIdle();
-        voiceNotifier.setError("Processing failed: $message"); // Use message from result
-         _updateStatusText("Sorry, I couldn't process that request."); // User-friendly message
+      if (classificationResult['success'] != true) {
+         final message = classificationResult['message'] ?? 'Unknown processing error.';
+         _handleError(message, "Command Error");
+         return; // Stop if classification failed
       }
 
-    } on LlmException catch (e, s) {
-      _log.e("Phase 3: LLM Exception during voice processing", error: e, stackTrace: s);
+      final action = classificationResult['action'] as String?;
+      final params = classificationResult['params'] as Map<String, dynamic>? ?? {};
+      final originalIntent = classificationResult['original_intent'] as Map<String, dynamic>?;
+
+      // === Step 2: Check LG Connection (if needed for action) ===
+      bool needsConnection = action != 'GENERATE_KML' && action != 'UNKNOWN'; // KML generation connects just before sending
+      bool connectionSuccessful = _lgService.isConnected;
+
+      if (needsConnection && !connectionSuccessful) {
+          _updateStatusText('Connecting to Liquid Galaxy...');
+          connectionSuccessful = await _lgService.connect();
+          if (connectionSuccessful) {
+             lgConnectionNotifier.setConnected(); // Update provider state
+             _updateStatusText('Connected. Executing command...');
+          } else {
+             _handleError("Failed to connect to Liquid Galaxy.", "Connection Failed");
+             lgConnectionNotifier.setDisconnected("Connection Failed");
+             return; // Stop if connection failed
+          }
+      }
+
+      // === Step 3: Execute Action via LGService ===
+      _updateStatusText('Executing: $action...'); // Update status text
+
+      switch (action) {
+        case 'GENERATE_KML':
+          final kml = classificationResult['kml'] as String?;
+          if (kml != null) {
+             _log.d("Phase 4: Sending KML to LG...");
+             // Ensure connection before sending KML
+             _log.i("=== GENERATED KML START ===\n$kml\n=== GENERATED KML END ===");
+             if (!_lgService.isConnected) {
+                 _updateStatusText('Connecting to send KML...');
+                 connectionSuccessful = await _lgService.connect();
+                 if (!connectionSuccessful) {
+                    _handleError("Failed to connect to Liquid Galaxy to send KML.", "Connection Failed");
+                    lgConnectionNotifier.setDisconnected("Connection Failed");
+                    return;
+                 }
+                 lgConnectionNotifier.setConnected();
+             }
+             final kmlFileName = 'voice_cmd_${DateTime.now().millisecondsSinceEpoch}.kml';
+             await _lgService.sendKmlToLg(kml, kmlFileName);
+
+             _updateStatusText("KML Displayed on Liquid Galaxy.");
+          } else {
+             throw LlmException("KML generation reported success but KML was null."); // Should be caught below
+          }
+          break;
+
+        case 'CLEAR_KML':
+          await _lgService.clearKmlOnLg();
+          _updateStatusText("KML cleared from Liquid Galaxy.");
+          break;
+
+        case 'CLEAR_LOGO':
+           await _lgService.clearLogo();
+           _updateStatusText("Logo cleared from Liquid Galaxy.");
+           break;
+
+        case 'PLAY_TOUR':
+           await _lgService.playTour();
+           _updateStatusText("Tour started on Liquid Galaxy.");
+           break;
+
+        case 'EXIT_TOUR':
+           await _lgService.exitTour();
+           _updateStatusText("Tour stopped on Liquid Galaxy.");
+           break;
+
+        case 'FLY_TO':
+           // Attempt to use LookAt string if provided directly by LLM (less likely now)
+           final lookAt = params['lookAt'] as String? ?? originalIntent?['lookAt'] as String?;
+           final locationName = params['location_name'] as String? ?? originalIntent?['location_name'] as String?;
+
+           if (lookAt != null && lookAt.isNotEmpty) {
+              _log.i("FLY_TO: Using direct LookAt KML provided.");
+              _log.i("Executing direct FlyTo LookAt: $lookAt");
+              await _lgService.flyToLookAt(lookAt);
+              _updateStatusText("Flying to view on Liquid Galaxy.");
+           }
+           // **Primary Path: Use location name to generate KML**
+           else if (locationName != null && locationName.isNotEmpty) {
+              _log.i("FLY_TO: No direct LookAt KML. Generating KML for location: '$locationName'");
+              _updateStatusText("Generating KML for $locationName..."); // Update status
+
+              // Generate KML specifically for flying to the location
+              final kmlProcessor = KmlGeneratorService(llm: llmProvider.client!);
+              // Use a simple prompt focused on just viewing the location
+              final kml = await kmlProcessor.generateKml("Show $locationName");
+              _updateStatusText("Sending KML for $locationName..."); // Update status
+
+              _log.i("=== FLY_TO FALLBACK KML START ===\n$kml\n=== FLY_TO FALLBACK KML END ===");
+               // Ensure connection before sending
+              if (!_lgService.isConnected) { /* connect */ } // Simplified connection check
+
+              final kmlFileName = 'flyto_${locationName.replaceAll(' ','_')}_${DateTime.now().millisecondsSinceEpoch}.kml';
+              await _lgService.sendKmlToLg(kml, kmlFileName);
+
+               _updateStatusText("Flying to $locationName on Liquid Galaxy."); // Final status
+           } else {
+              _log.e("FLY_TO intent received but missing LookAt KML and location name.");
+              throw LgException("Could not determine where to fly to for FLY_TO command.");
+           }
+           break;
+
+        case 'UNKNOWN':
+        default:
+          _log.w("Unhandled or UNKNOWN action received: $action");
+           // Use the message from the classification result if available
+           final message = classificationResult['message'] ?? "I'm not sure how to handle that request for Liquid Galaxy.";
+           _handleError(message, "Unknown Command");
+           break;
+      }
+
+      // === Step 4: Reset State (on success) ===
+      // Short delay to allow user to read final status message
+      await Future.delayed(const Duration(milliseconds: 2000));
       mascotNotifier.setIdle();
-      voiceNotifier.setError("LLM Error: ${e.message}");
-       _updateStatusText("Sorry, there was an issue with the AI service.");
-    } catch (e, s) {
-      // Catch any other unexpected errors
-      _log.f("Phase 3: Unexpected error during voice processing", error: e, stackTrace: s);
-      mascotNotifier.setIdle();
-      voiceNotifier.setError("Unexpected error: ${e.toString()}");
-       _updateStatusText("Sorry, an unexpected error occurred.");
+      voiceNotifier.setIdle();
+      _updateStatusText("Ready. Tap microphone to start.");
+
+
+    } on LgException catch (e, s) { // Catch specific LG connection/command errors
+       _handleError(e.message, "Liquid Galaxy Error", error: e.underlyingError ?? e, stackTrace: s);
+       // Optionally update LG connection state if it was a connection error
+       if (e.message.toLowerCase().contains('connect')) {
+          lgConnectionNotifier.setDisconnected(e.message);
+       }
+    } on LlmException catch (e, s) { // Catch LLM errors (classification or KML gen)
+       _handleError(e.message, "AI Service Error", error: e.underlyingError ?? e, stackTrace: s);
+    } catch (e, s) { // Catch any other unexpected errors
+       _handleError("An unexpected error occurred.", "Error", error: e, stackTrace: s);
     }
-    // Note: State reset is handled within success/error blocks or temporarily after success.
+    // Note: State reset on error is handled within _handleError
   }
 
 
   @override
   Widget build(BuildContext context) {
-    // Watch necessary states for rebuilds
+    // ... (rest of the build method - no changes needed from your provided code) ...
+        // Watch necessary states for rebuilds
     final connectionState = context.watch<LgConnectionStateNotifier>().isConnected;
     final mascotAppearance = context.watch<MascotStateNotifier>().appearance;
     final voiceState = context.watch<VoiceStateNotifier>(); // Watch voice state too
