@@ -1450,8 +1450,7 @@ class ApiKeyManager {
   }
 
   /// Get active provider (defaults to NVIDIA if not set or invalid)
-  Future<LlmProvider> getActiveProvider() async {
-     LlmProvider defaultProvider = LlmProvider.nvidia;
+  Future<LlmProvider?> getActiveProvider() async { // <-- Return type is nullable
      try {
         final indexString = await _secureStorage.read(key: _activeProviderPref);
         if (indexString != null) {
@@ -1459,27 +1458,34 @@ class ApiKeyManager {
            if (index != null && index >= 0 && index < LlmProvider.values.length) {
               final provider = LlmProvider.values[index];
                _log.d("Retrieved active provider: $provider");
-              return provider;
+              return provider; // Return the found provider
            } else {
-               _log.w("Invalid active provider index found: '$indexString'. Defaulting to $defaultProvider");
+               _log.w("Invalid active provider index found: '$indexString'. No provider selected.");
            }
         } else {
-            _log.d("No active provider preference found. Defaulting to $defaultProvider");
+            _log.d("No active provider preference found.");
         }
      } catch (e, s) {
-        _log.e("Failed to read active provider. Defaulting to $defaultProvider", error: e, stackTrace: s);
+        _log.e("Failed to read active provider preference.", error: e, stackTrace: s);
      }
-     return defaultProvider; // Default
+     return null; // Default return is null (no provider set)
   }
 
   /// Get a client for the active provider. Throws ApiKeyException if key missing.
   Future<BaseLlmClient> getActiveClient({Duration? timeout}) async {
-    final provider = await getActiveProvider();
+    final provider = await getActiveProvider(); // Can return null now
+
+    if (provider == null) {
+        _log.e("Cannot create LLM client: No active provider configured.");
+        throw ApiKeyException("No active LLM provider configured. Please select one in Settings.");
+    }
+
     final apiKey = await getApiKey(provider);
 
     if (apiKey == null || apiKey.isEmpty) {
       _log.e("API Key for active provider ($provider) not found or empty.");
-      throw ApiKeyException("API Key for active provider ($provider) is not set.");
+      // Keep this specific error message for missing key
+      throw ApiKeyException("API Key for the selected provider ($provider) is not set.");
     }
 
     _log.i("Creating LLM client for active provider: $provider");
@@ -1487,10 +1493,12 @@ class ApiKeyManager {
     String modelName;
     // Consider making models configurable later
     switch (provider) {
-      case LlmProvider.nvidia: modelName = 'google/gemma-2-27b-it'; break;
-      case LlmProvider.groq: modelName = 'meta-llama/llama-4-maverick-17b-128e-instruct'; break;
-      case LlmProvider.gemini: modelName = 'gemma2-27b-it'; break;
-      case LlmProvider.openrouter: modelName = 'google/gemma-3-27b-it:free'; break;
+       // --- Model names updated based on previous llm.txt ---
+       case LlmProvider.nvidia: modelName = 'google/gemma-2-27b-it'; break;
+       case LlmProvider.groq: modelName = 'gemma2-9b-it'; break; // Corrected based on common Groq availability
+       case LlmProvider.gemini: modelName = 'gemini-1.5-flash-latest'; break; // Adjusted to a common Gemini model
+       case LlmProvider.openrouter: modelName = 'google/gemma-2-9b-it'; break; // Adjusted to a common OpenRouter model
+       // --- End Model names update ---
     }
 
     try {
@@ -1501,7 +1509,7 @@ class ApiKeyManager {
          timeout: timeout,
        );
     } catch (e, s) {
-        _log.e("Failed to create LLM Client", error: e, stackTrace: s);
+        _log.e("Failed to create LLM Client for $provider", error: e, stackTrace: s);
         // Rethrow as a more specific error or handle
         throw LlmException("Failed to instantiate LLM client", underlyingError: e);
     }
@@ -1599,42 +1607,55 @@ class VoiceCommandProcessor {
 /// Provider model for the active LLM to be used with Provider package
 class ActiveLlmProvider extends ChangeNotifier {
   BaseLlmClient? _client;
-  LlmProvider _provider = LlmProvider.nvidia; // Default provider
+  LlmProvider? _provider;
   bool _isLoading = false;
   String? _error;
   final ApiKeyManager _apiKeyManager = ApiKeyManager(); // Instance of the manager
   final Logger _log = logger;
 
   BaseLlmClient? get client => _client;
-  LlmProvider get provider => _provider;
+  LlmProvider? get provider => _provider;
   bool get isLoading => _isLoading;
   String? get error => _error;
-  bool get isReady => _client != null && !_isLoading;
+  bool get isReady => _client != null && _provider != null && !_isLoading;
+  bool get isConfigured => _provider != null;
 
   /// Initialize the provider from saved preferences. Call this early.
   Future<void> initialize() async {
     _log.i("Initializing ActiveLlmProvider...");
+    if (_isLoading) return;
+
     _isLoading = true;
     _error = null;
+    _client = null; // Ensure client is null at start
+    _provider = null;
     // Notify immediately that loading has started
     // Use WidgetsBinding.instance.addPostFrameCallback or Future.microtask
     // if calling this during build phase, otherwise direct notifyListeners is fine.
-    notifyListeners();
+    Future.microtask(() => notifyListeners());
 
     try {
-      _provider = await _apiKeyManager.getActiveProvider();
-      _log.d("Retrieved active provider preference: $_provider");
-      // Attempt to get the client, which implicitly checks the API key
       _client = await _apiKeyManager.getActiveClient();
-      _log.i("LLM Client initialized successfully for $_provider.");
+      // If getActiveClient succeeded, a provider must have been selected
+      _provider = await _apiKeyManager.getActiveProvider(); // Re-fetch the provider for internal state
+      if (_provider != null) {
+         _log.i("LLM Client initialized successfully for $_provider.");
+      } else {
+          // This case shouldn't happen if getActiveClient succeeded, but good for safety
+          _log.e("Internal inconsistency: Client created but provider is null.");
+          throw LlmException("Initialization failed: Internal state error.");
+      }
     } on ApiKeyException catch (e) {
-       _log.w("Initialization failed: API key missing for provider $_provider", error: e);
-      _error = e.message; // Inform user key is missing
-      _client = null;
+       // Catches both "No active provider" and "API Key for ... is not set."
+       _log.w("Initialization failed: ${e.message}", error: e);
+       _error = e.message; // Use the specific message from the exception
+       _client = null;
+       _provider = null; // Ensure provider is null on config error
     } catch (e, s) {
        _log.e("Error initializing LLM provider", error: e, stackTrace: s);
-      _error = 'Failed to initialize LLM: ${e.toString()}';
-      _client = null;
+       _error = 'Failed to initialize LLM: ${e.toString()}';
+       _client = null;
+       _provider = null; // Ensure provider is null on other errors
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -1644,14 +1665,16 @@ class ActiveLlmProvider extends ChangeNotifier {
   /// Switch to a different provider
   Future<void> switchProvider(LlmProvider newProvider) async {
      _log.i("Attempting to switch provider to $newProvider");
+     
     if (newProvider == _provider && _client != null) {
        _log.d("Provider $newProvider is already active and client exists. No switch needed.");
-      return; // Avoid unnecessary work
+      return;
     }
 
     _isLoading = true;
     _error = null;
     _client = null; // Clear old client immediately
+    // Keep _provider as is until successful switch
     notifyListeners();
 
     try {
@@ -1659,20 +1682,26 @@ class ActiveLlmProvider extends ChangeNotifier {
       final apiKey = await _apiKeyManager.getApiKey(newProvider);
       if (apiKey == null || apiKey.isEmpty) {
         _log.w("Cannot switch to $newProvider: API Key not found.");
-        throw ApiKeyException("API Key for provider $newProvider is not set.");
+        throw ApiKeyException("API Key for provider $newProvider is not set. Please add it in Settings.");
       }
 
-      _provider = newProvider;
-      await _apiKeyManager.setActiveProvider(newProvider); // Save preference
-      _client = await _apiKeyManager.getActiveClient(); // Create new client
+      await _apiKeyManager.setActiveProvider(newProvider); // Save preference FIRST
+      _client = await _apiKeyManager.getActiveClient(); // Create new client (uses the preference we just set)
+      _provider = newProvider; // Update internal provider state AFTER success
       _log.i("Successfully switched provider to $newProvider.");
 
     } on ApiKeyException catch (e) {
-       _log.w("Switch failed: API key missing for provider $newProvider", error: e);
-       _error = e.message; // Keep error message specific to key missing
+       _log.w("Switch failed: ${e.message}", error: e);
+       _error = e.message; // Keep error message specific
+       // Ensure state is consistent on failure
+       _client = null;
+       // Optionally revert _provider back if desired, but keeping it null might be okay
+       // _provider = null; // Or load the previously saved provider again?
     } catch (e, s) {
        _log.e("Error switching provider to $newProvider", error: e, stackTrace: s);
-      _error = 'Failed to switch provider: ${e.toString()}';
+       _error = 'Failed to switch provider: ${e.toString()}';
+       _client = null;
+       // _provider = null; // Clear provider on generic error
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -1681,6 +1710,13 @@ class ActiveLlmProvider extends ChangeNotifier {
 
   /// Update API key for the current provider
   Future<void> updateApiKey(String apiKey) async {
+    if (_provider == null) {
+        _log.w("Cannot update API key: No LLM provider is currently selected.");
+        _error = "Please select a provider before saving an API key.";
+        notifyListeners();
+        return;
+    }
+
      _log.i("Attempting to update API Key for current provider: $_provider");
     if (apiKey.isEmpty) {
         _log.w("Attempted to update with an empty API key.");
@@ -1694,7 +1730,8 @@ class ActiveLlmProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _apiKeyManager.saveApiKey(_provider, apiKey);
+      // Use the non-null assertion as we checked _provider above
+      await _apiKeyManager.saveApiKey(_provider!, apiKey);
       // Re-create the client with the new key
       _client = await _apiKeyManager.getActiveClient();
       _log.i("API Key updated and client refreshed for $_provider.");
@@ -1706,5 +1743,13 @@ class ActiveLlmProvider extends ChangeNotifier {
       _isLoading = false;
       notifyListeners();
     }
+  }
+  void clearConfiguration() {
+      _log.i("Clearing ActiveLlmProvider state.");
+      _client = null;
+      _provider = null;
+      _error = "Configuration cleared. Please select a provider and add an API key.";
+      _isLoading = false; // Ensure loading is false
+      notifyListeners();
   }
 }
