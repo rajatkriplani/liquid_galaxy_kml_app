@@ -1495,9 +1495,9 @@ class ApiKeyManager {
     switch (provider) {
        // --- Model names updated based on previous llm.txt ---
        case LlmProvider.nvidia: modelName = 'google/gemma-2-27b-it'; break;
-       case LlmProvider.groq: modelName = 'gemma2-9b-it'; break; // Corrected based on common Groq availability
-       case LlmProvider.gemini: modelName = 'gemini-1.5-flash-latest'; break; // Adjusted to a common Gemini model
-       case LlmProvider.openrouter: modelName = 'google/gemma-2-9b-it'; break; // Adjusted to a common OpenRouter model
+       case LlmProvider.groq: modelName = 'meta-llama/llama-4-maverick-17b-128e-instruct'; break;
+       case LlmProvider.gemini: modelName = 'gemini-2.5-flash-preview-04-17'; break;
+       case LlmProvider.openrouter: modelName = 'google/gemma-3-27b-it:free'; break;
        // --- End Model names update ---
     }
 
